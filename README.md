@@ -34,8 +34,8 @@ pip install -r requirements.txt
 
 ### 前置条件
 
-- 数据集: 仅支持 `.parquet` 格式，请放置在 `data/dataset/` 目录下，训练时会加载该目录以及递归子目录下的所有 parquet 文件，详见[数据集](#数据集)部分。
-- 分词器: 分词器模型请放置在 `data/tokenizer/model/` 目录下，支持 HuggingFace TokenizerFast 格式。（推荐使用本人中、英文分词器项目 [QiTianTokenizer](https://huggingface.co/Morton-Li/QiTianTokenizer-Base)，可选 12k～128k 词表大小）。
+- 数据集: 仅支持 `.parquet` 格式，请放置在 `data/dataset/` 目录下，详见[数据集](#数据集)部分。
+- 分词器: 分词器模型请放置在 `data/tokenizer/model/` 目录下，详见[分词器](#分词器)部分。
 
 ---
 
@@ -55,6 +55,12 @@ python scripts/pretrain.py [--nprocs N]
 
 ```bash
 python scripts/finetuner.py [--nprocs N]
+```
+
+#### 对 Qwen3 模型进行预训练
+
+```bash
+python scripts/qwen3_pretrain.py [--nprocs N]
 ```
 
 ---
@@ -104,10 +110,25 @@ python scripts/finetuner.py [--nprocs N]
 数据集文件应放置在 `data/dataset/` 目录下，训练时会加载该目录以及递归子目录下的所有 parquet 文件。
 数据集应包含一个字段（默认为 `tokenized`，可通过配置文件 `dataset.field_name` 修改）存储输入文本的 token id 数组，格式为 numpy.array，可调整精度以节省存储空间，例如使用 uint16 代替 int32。
 
+具体数据集组织方式和预处理方法由于版权和隐私问题仅提供部分示例，脚本位于 `scripts/dataset/` 目录下，保留了一些工具函数以便用户根据自己的情况借鉴和使用。
+
+---
+
+### 分词器
+
+分词器模型应放置在 `data/tokenizer/model/` 目录下，支持 HuggingFace TokenizerFast 格式。
+建议使用本人中、英文分词器项目 [QiTianTokenizer](https://huggingface.co/Morton-Li/QiTianTokenizer-Base)，该分词器提供了多种词表大小（12k～128k）以适应不同需求，且在中英文对话场景中表现良好。
+
+在当前训练框架下，并未实现对其他分词器的适配，不过鉴于低耦合的设计原则，适配其他分词器是相对简单的工作，但目前没有计划实现这一功能。
+
+---
+
 ### 训练器
 
 本项目参考了 [Qwen3](https://arxiv.org/abs/2505.09388) 的数据处理方式，
 简单来说就是未在数据集中使用 BOS（begin of sequence）标记，同时又不想因为这一变化设计一个功能开关，所以在训练器的预训练、监督微调训练中做了一个特殊处理，具体可在 inference_samples 函数中了解。
+
+---
 
 ## 📄 许可证
 
