@@ -19,21 +19,43 @@ pip install -r requirements.txt
 
 ---
 
-## 🛠️ 使用
-
-项目主要入口均位于 `scripts` 目录下，首次执行训练框架会创建所需的配置文件 `config.json` 并主动退出，请根据需要修改配置文件。
-
-数据集文件请放置在 `data/dataset/` 目录下，仅支持 `.parquet` 格式，训练时会加载该目录以及递归子目录下的所有数据文件。
-
-分词器模型请放置在 `data/tokenizer/model/` 目录下，支持 HuggingFace TokenizerFast 格式。（推荐使用本人中、英文分词器项目 [QiTianTokenizer](https://huggingface.co/Morton-Li/QiTianTokenizer-Base)，可选 12k～128k 词表大小）。
-
----
-
-### 术语和定义
+## 术语和定义
 
 - **快速评估**：在训练过程中使用当下模型的权重，对少量且固定的验证集进行评估。
 - **训练步**：计算设备接受的最小训练单位，也称 `min-step`，每步会处理一个批次的数据。
 - **优化步**：模型权重更新步，也称 `opt-step`（优化器步），计算公式为 `min-step x grad_accum_steps`，故：当 grad_accum_steps 为 1 时训练步 = 优化步。
+- **DDP**：分布式数据并行（Distributed Data Parallel）。
+
+---
+
+## 🛠️ 使用
+
+项目主要入口均位于 `scripts` 目录下，首次执行训练框架会创建所需的配置文件 `config.json` 并主动退出，请根据需要修改配置文件，详见[配置文件解析](#配置文件解析)。
+
+### 前置条件
+
+- 数据集: 仅支持 `.parquet` 格式，请放置在 `data/dataset/` 目录下，训练时会加载该目录以及递归子目录下的所有 parquet 文件，详见[数据集](#数据集)部分。
+- 分词器: 分词器模型请放置在 `data/tokenizer/model/` 目录下，支持 HuggingFace TokenizerFast 格式。（推荐使用本人中、英文分词器项目 [QiTianTokenizer](https://huggingface.co/Morton-Li/QiTianTokenizer-Base)，可选 12k～128k 词表大小）。
+
+---
+
+### 进行训练
+
+训练脚本均已配置 she-bang，确保有可执行权限后可直接执行，会自动使用环境变量中的 python，更建议使用 python 执行以确保使用正确的 Python 环境。
+
+参数：
+- `nprocs`: 指定 DDP 使用的 GPU 数量，不提供时默认为 1（不使用 DDP）。
+
+#### 进行预训练 (PreTrain)
+```bash
+python scripts/pretrain.py [--nprocs N]
+```
+
+#### 进行监督微调 (SFT)
+
+```bash
+python scripts/finetuner.py [--nprocs N]
+```
 
 ---
 
@@ -77,21 +99,15 @@ pip install -r requirements.txt
 
 ---
 
-### 进行训练
+### 📊数据集
 
-`nprocs` 参数指定 DDP 训练使用的 GPU 数量，不提供时默认为 1（不使用 DDP）。
+数据集文件应放置在 `data/dataset/` 目录下，训练时会加载该目录以及递归子目录下的所有 parquet 文件。
+数据集应包含一个字段（默认为 `tokenized`，可通过配置文件 `dataset.field_name` 修改）存储输入文本的 token id 数组，格式为 numpy.array，可调整精度以节省存储空间，例如使用 uint16 代替 int32。
 
-```bash
-python scripts/pretrain.py [--nprocs N]
-```
+### 训练器
 
-### 进行监督微调 (SFT)
-
-```bash
-python scripts/finetuner.py [--nprocs N]
-```
-
----
+本项目参考了 [Qwen3](https://arxiv.org/abs/2505.09388) 的数据处理方式，
+简单来说就是未在数据集中使用 BOS（begin of sequence）标记，同时又不想因为这一变化设计一个功能开关，所以在训练器的预训练、监督微调训练中做了一个特殊处理，具体可在 inference_samples 函数中了解。
 
 ## 📄 许可证
 
