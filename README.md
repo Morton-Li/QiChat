@@ -17,13 +17,15 @@
 pip install -r requirements.txt
 ```
 
+> 由于语法差异，明确不兼容 Python 3.11 及以下版本，强“兼”难度不大，欢迎提交 PR 添加对 Python 3.11 的支持，但本人更建议向前看。
+
 ---
 
 ## 术语和定义
 
 - **快速评估**：在训练过程中使用当下模型的权重，对少量且固定的验证集进行评估。
-- **训练步**：计算设备接受的最小训练单位，也称 `min-step`，每步会处理一个批次的数据。
-- **优化步**：模型权重更新步，也称 `opt-step`（优化器步），计算公式为 `min-step x grad_accum_steps`，故：当 grad_accum_steps 为 1 时训练步 = 优化步。
+- **训练步**：计算设备接受的最小训练单位，也称 `micro-step`，每步会处理一个批次的数据。
+- **优化步**：模型权重更新步，也称 `opt-step`（优化器步），计算公式为 `micro-step x grad_accum_steps`，故：当 grad_accum_steps 为 1 时训练步 = 优化步。
 - **DDP**：分布式数据并行（Distributed Data Parallel）。
 
 ---
@@ -43,6 +45,8 @@ pip install -r requirements.txt
 
 训练脚本均已配置 she-bang，确保有可执行权限后可直接执行，会自动使用环境变量中的 python，更建议使用 python 执行以确保使用正确的 Python 环境。
 
+本框架使用 TensorBoard 进行训练日志记录，会自动生成并将日志记录在在 `logs/` 目录下，建议使用 TensorBoard 可视化工具进行查看和分析。
+
 参数：
 - `nprocs`: 指定 DDP 使用的 GPU 数量，不提供时默认为 1（不使用 DDP）。
 
@@ -57,7 +61,7 @@ python scripts/pretrain.py [--nprocs N]
 python scripts/finetuner.py [--nprocs N]
 ```
 
-#### 对 Qwen3 模型进行预训练
+#### 使用本框架对 Qwen3 模型进行预训练
 
 ```bash
 python scripts/qwen3_pretrain.py [--nprocs N]
@@ -117,7 +121,7 @@ python scripts/qwen3_pretrain.py [--nprocs N]
 ### 分词器
 
 分词器模型应放置在 `data/tokenizer/model/` 目录下，支持 HuggingFace TokenizerFast 格式。
-建议使用本人中、英文分词器项目 [QiTianTokenizer](https://huggingface.co/Morton-Li/QiTianTokenizer-Base)，该分词器提供了多种词表大小（12k～128k）以适应不同需求，且在中英文对话场景中表现良好。
+建议使用本人中、英文分词器项目 [QiTianTokenizer](https://huggingface.co/Morton-Li/QiTianTokenizer-Base)，该分词器为通用分词器，提供了多种词表大小（12k～128k）以适应不同需求，且在中英文对话场景中表现良好。
 
 在当前训练框架下，并未实现对其他分词器的适配，不过鉴于低耦合的设计原则，适配其他分词器是相对简单的工作，但目前没有计划实现这一功能。
 
