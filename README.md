@@ -85,6 +85,7 @@ python scripts/qwen3_pretrain.py [--nprocs N]
   - `batch_size`: 批次大小，在使用 DDP 时指每个设备的批次大小。
   - `learning_rate`: 学习率（峰值）。
   - `min_learning_rate`: 最小学习率，学习率调度器会将学习率从 `learning_rate` 线性衰减到 `min_learning_rate` 后停止衰减。
+  - `optimizer_beta`: AdamW 优化器 beta 设置。
   - `num_epochs`: 训练的总轮数。
   - `warmup_ratio`: 学习率预热占 **单轮次** **优化步** 数的比率。假设每轮次有 1000 个优化步，warmup_ratio 为 0.1，则预热阶段将从第 0 步学习率从 0 经过 100 步线性增加到 `learning_rate`。
   - `gradient_clipping_max_norm`: 梯度裁剪的最大范数，
@@ -121,7 +122,7 @@ python scripts/qwen3_pretrain.py [--nprocs N]
 ### 分词器
 
 分词器模型应放置在 `data/tokenizer/model/` 目录下，支持 HuggingFace TokenizerFast 格式。
-建议使用本人中、英文分词器项目 [QiTianTokenizer](https://huggingface.co/Morton-Li/QiTianTokenizer-Base)，该分词器为通用分词器，提供了多种词表大小（12k～128k）以适应不同需求，且在中英文对话场景中表现良好。
+建议使用 [QiTianTokenizer](https://huggingface.co/Morton-Li/QiTianTokenizer-Base) 分词器项目，该分词器为通用分词器，提供了多种词表大小（12k～128k）以适应不同需求，且在中英文对话场景中表现良好。
 
 在当前训练框架下，并未实现对其他分词器的适配，不过鉴于低耦合的设计原则，适配其他分词器是相对简单的工作，但目前没有计划实现这一功能。
 

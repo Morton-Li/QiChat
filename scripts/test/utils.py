@@ -50,7 +50,7 @@ def get_device(device: Literal['auto', 'cuda', 'mps', 'cpu']) -> torch.device:
 
 def init_model(
     param_size: Literal['Tiny', '73M', '0.3B', '0.6B', '1.3B', '3.2B'] = 'Tiny',
-    attn_implementation: Literal['flash_attention_2', 'sdpa', 'memory_efficient'] = 'flash_attention_2',
+    attn_implementation: Literal['eager', 'memory_efficient', 'sdpa', 'flash_attention_2', 'flash_attention_3'] = 'flash_attention_2',
     dtype: Literal['float16', 'bfloat16', 'float32'] = 'bfloat16',
     additional_model_config_kwargs: Optional[dict] = None,
     checkpoint: Optional[dict] = None,

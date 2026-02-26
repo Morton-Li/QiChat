@@ -165,6 +165,10 @@ class QiChatAttention(nn.Module):
         self.v_proj = nn.Linear(in_features=self.config.d_model, out_features=proj_dim_kv, bias=False)
         self.o_proj = nn.Linear(in_features=proj_dim_qo, out_features=self.config.d_model, bias=False)
 
+        # QK-Norm
+        self.q_norm = nn.RMSNorm(normalized_shape=self.config.d_kv, eps=self.config.rms_norm_eps)
+        self.k_norm = nn.RMSNorm(normalized_shape=self.config.d_kv, eps=self.config.rms_norm_eps)
+
     def forward(
         self,
         hidden_states: torch.FloatTensor,
@@ -210,8 +214,8 @@ class QiChatAttention(nn.Module):
             raise ValueError(f'cos_buf and sin_buf must have shape (batch_size, seq_len, d_kv/2), but got {cos_buf.shape} and {sin_buf.shape}')
 
         # QKV projection
-        query_states = self.q_proj(hidden_states).view(batch_size, seq_len, self.config.n_heads, self.config.d_kv).transpose(1, 2)       # [batch_size, n_heads, seq_len, d_kv]
-        key_states = self.k_proj(hidden_states).view(batch_size, seq_len, self.config.n_kv_heads, self.config.d_kv).transpose(1, 2)    # [batch_size, n_kv_heads, seq_len, d_kv]
+        query_states = self.q_norm(self.q_proj(hidden_states).view(batch_size, seq_len, self.config.n_heads, self.config.d_kv)).transpose(1, 2)       # [batch_size, n_heads, seq_len, d_kv]
+        key_states = self.k_norm(self.k_proj(hidden_states).view(batch_size, seq_len, self.config.n_kv_heads, self.config.d_kv)).transpose(1, 2)    # [batch_size, n_kv_heads, seq_len, d_kv]
         value_states = self.v_proj(hidden_states).view(batch_size, seq_len, self.config.n_kv_heads, self.config.d_kv).transpose(1, 2)    # [batch_size, n_kv_heads, seq_len, d_kv]
 
         # Apply RoPE to Q and K

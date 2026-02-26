@@ -6,7 +6,10 @@ from .utils.path import data_path
 
 
 class QiTianTokenizerFast(PreTrainedTokenizerFast):
-    """ QiTianTokenizerFast """
+    """
+    QiTianTokenizerFast
+    https://huggingface.co/Morton-Li/QiTianTokenizer-Base
+    """
     model_input_names: list[str] = ["input_ids", "attention_mask"]
 
 

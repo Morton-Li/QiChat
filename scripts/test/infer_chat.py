@@ -18,7 +18,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from src.config import get_config
 from src.module.model import QiChatForCausalLM
 from src.tokenizer import QiTianTokenizerFast, get_tokenizer
-from src.utils.type import DotDict
+from src.utils.type import TrainerConfig
 from scripts.test.utils import set_seed, get_device, init_model, load_model_checkpoint
 
 
@@ -37,7 +37,7 @@ def main(
     print(f'Using device: {use_device.type}')
 
     tokenizer: QiTianTokenizerFast = get_tokenizer()
-    config: DotDict = get_config()
+    config: TrainerConfig = get_config()
     model: QiChatForCausalLM = init_model(
         param_size=config.model.param_size,
         attn_implementation=config.model.attn_implementation,

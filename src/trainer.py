@@ -5,7 +5,7 @@ import random
 import time
 from collections import deque
 from contextlib import nullcontext
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy
 import pandas
@@ -27,15 +27,32 @@ from .tokenizer import QiTianTokenizerFast, get_tokenizer
 from .tracker import TrainingTracker
 from .utils.check import is_fork_supported, v_mem_status
 from .utils.grad import collect_layer_grad_norms
+from .utils.losses import build_recent_unlikelihood_negative_samples, compute_unlikelihood_loss_from_negatives
 from .utils.masks import build_span_mask
 from .utils.path import data_path, log_path
-from .utils.type import DotDict
+from .utils.type import TrainerConfig, TrainerBuffer, EpochSize, TrainerDataloader, TrainMetricsAccumulator
 from .config import get_config
 from .logger import Logger, get_logger
 
 
 class TrainerBase:
     """ Base class for Trainer, providing common utilities and interfaces. """
+    def __init__(self) -> None:
+        self.config: TrainerConfig = get_config()
+        self.logger: Logger = get_logger(log_filename=f'{self.__class__.__name__}.log', log_level=self.config.log_level)
+        if not self.is_main_process: self.logger.disable()
+
+        self.device: torch.device = self._get_device(device=self.config.device)
+        if self.device.type == 'cuda':
+            self.scaler = torch.amp.GradScaler()
+
+        self.set_seed(seed=self.config.seed)
+
+        self._buffer: TrainerBuffer = TrainerBuffer()
+
+        if self.is_main_process:
+            self._summary_writer = tensorboard.SummaryWriter(log_dir=str(log_path(self.__class__.__name__)))
+
     @property
     def is_distributed(self) -> bool:
         """Check if distributed training is initialized."""
@@ -47,75 +64,21 @@ class TrainerBase:
         if not self.is_distributed: return True
         return distributed.get_rank() == 0
 
+    @property
+    def micro_batch_size(self) -> int:
+        """Calculate the micro-batch size per GPU."""
+        return self.config.training.batch_size
 
-class Trainer(TrainerBase):
-    """ QiChat Trainer """
-    VERSION = '1.5.6'
-    TASK_TYPE: Literal['PreTraining', 'FineTuning']
+    @property
+    def step_batch_size(self) -> int:
+        """Calculate the effective batch size for each training step, considering distributed training."""
+        if self.is_distributed: return self.micro_batch_size * distributed.get_world_size()
+        else: return self.micro_batch_size
 
-    def __init__(self, *args, **kwargs):
-        self.config: DotDict = get_config()
-        self.logger: Logger = get_logger(log_filename=f'{self.__class__.__name__}.log', log_level=self.config.log_level)
-        if not self.is_main_process: self.logger.disable()
-        if self.is_distributed and self.is_main_process:
-            self.logger.info(f'Distributed training is enabled. world_size: {distributed.get_world_size()}')
-
-        self._buffer: DotDict = DotDict({
-            'batch_size': {
-                'step_batch_size': self.config.training.batch_size * (distributed.get_world_size() if self.is_distributed else 1),
-                'optimizer_batch_size': self.config.training.batch_size * self.config.training.grad_accum_steps * (distributed.get_world_size() if self.is_distributed else 1),
-            },
-            'epoch_size': {
-                'train': {
-                    'micro': 0,  # 全局 micro-batch 数
-                    'optimizer': 0,  # 单卡视角（大卡）的 optimizer step 数
-                },
-                'valid': 0,
-            },
-            'dataset': {
-                'train_samples': 0,
-                'valid_samples': 0,
-            },
-            'eval_optimizer_steps': {},  # 在训练过程中进行评估的优化器步数集合
-        })
-
-        self.device: torch.device = self._get_device(device=self.config.device)
-        self.logger.info(f'{"Auto-detected" if self.config.device == "auto" else "Using device"} device: {self.device.type}')
-        if self.device.type == 'cuda':
-            self.scaler = torch.amp.GradScaler()
-
-        self.set_seed(seed=self.config.seed)
-
-        self.model: nn.Module | DistributedDataParallel
-        self.checkpoint: dict = {}
-        self.tokenizer: PreTrainedTokenizer
-        self.optimizer: optim.Optimizer
-        self.criterion: nn.Module
-        # self.scheduler: LayerWiseDummyScheduler | optim.lr_scheduler.LambdaLR | optim.lr_scheduler.ReduceLROnPlateau
-        self.training_tracker: TrainingTracker
-        self.model_probe: ModelProbe
-        self.notifier: Notifier
-
-        super().__init__(*args, **kwargs)  # 兼容多继承结构以保证所有基类都能按 MRO 被初始化
-
-        self.load_checkpoint()
-        self.init_tokenizer()
-        self.init_model()
-        self.init_optimizer()
-        self.init_loss_fn()
-        self.init_training_tracker()
-        self.init_model_probes()
-        self.init_notifier()
-
-        if self.is_main_process:
-            self.summary_writer = tensorboard.SummaryWriter(log_dir=str(log_path(self.__class__.__name__)))
-
-        self.data_loader = DotDict({
-            'train': DataLoader,
-            'valid': DataLoader,
-        })
-        self.load_dataset()
-        self.init_scheduler()
+    @property
+    def optimizer_batch_size(self) -> int:
+        """Calculate the effective batch size for each optimizer step."""
+        return self.step_batch_size * self.config.training.grad_accum_steps
 
     def _get_device(self, device: Literal['auto', 'cuda', 'mps', 'cpu']) -> torch.device:
         """
@@ -155,7 +118,67 @@ class Trainer(TrainerBase):
         random.seed(seed)
         numpy.random.seed(seed=seed)
         torch.manual_seed(seed=seed)
-        self.logger.info(f'Random seed set to: {seed}')
+
+    def set_dataset_size(self, train_samples: int, valid_samples: int):
+        """ Set the dataset size """
+        self._buffer.dataset_size.train = train_samples
+        self._buffer.dataset_size.valid = valid_samples
+
+    @property
+    def epoch_size(self) -> EpochSize:
+        """ Get the epoch size information """
+        return EpochSize.from_dict({
+            'train': {
+                'micro_steps': math.ceil(self._buffer.dataset_size.train / self.micro_batch_size),  # 每个 epoch 的 micro-batch 数
+                'optimizer_steps': math.ceil(self._buffer.dataset_size.train / self.optimizer_batch_size)
+            },
+            'valid': {
+                'steps': math.ceil(self._buffer.dataset_size.valid / self.micro_batch_size)
+            },
+        })
+
+    @property
+    def summary_writer(self) -> tensorboard.SummaryWriter:
+        if self.is_main_process: return self._summary_writer
+        # 返回一个假函数防止在非主进程中调用 summary_writer 导致错误
+        else: return lambda *args, **kwargs: None
+
+
+class Trainer(TrainerBase):
+    """ QiChat Trainer """
+    VERSION = '1.6.0'
+    TASK_TYPE: Literal['PreTraining', 'FineTuning']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        if self.is_distributed and self.is_main_process:
+            self.logger.info(f'Distributed training is enabled. world_size: {distributed.get_world_size()}')
+
+        self.logger.info(f'{"Auto-detected" if self.config.device == "auto" else "Using"} device: {self.device.type}')
+
+        self.model: nn.Module | DistributedDataParallel
+        self.checkpoint: dict = {}
+        self.tokenizer: PreTrainedTokenizer
+        self.optimizer: optim.Optimizer
+        self.criterion: nn.Module
+        # self.scheduler: LayerWiseDummyScheduler | optim.lr_scheduler.LambdaLR | optim.lr_scheduler.ReduceLROnPlateau
+        self.data_loader: TrainerDataloader
+        self.training_tracker: TrainingTracker
+        self.model_probe: ModelProbe
+        self.notifier: Notifier
+
+        self.load_checkpoint()
+        self.init_tokenizer()
+        self.init_model()
+        self.init_optimizer()
+        self.init_loss_fn()
+        self.init_auxiliary_loss()
+        self.init_training_tracker()
+        self.init_model_probes()
+        self.init_notifier()
+
+        self.load_dataset()
+        self.init_scheduler()
 
     def load_checkpoint(self):
         """Load the model checkpoint."""
@@ -301,18 +324,23 @@ class Trainer(TrainerBase):
 
         # 收集所有 LayerNorm 模块下的参数名
         layernorm_names = set()
+        embedding_names = set()
         for module_name, module in self.base_model.named_modules():
             if isinstance(module, (nn.LayerNorm, nn.RMSNorm)):
                 for param_name, _ in module.named_parameters():
                     full_name = f"{module_name}.{param_name}" if module_name else param_name
                     layernorm_names.add(full_name)
+            if isinstance(module, nn.Embedding):
+                for param_name, _ in module.named_parameters():
+                    full_name = f"{module_name}.{param_name}" if module_name else param_name
+                    embedding_names.add(full_name)
 
         # 精准分组参数
         seen_params = set()
         for name, param in self.base_model.named_parameters():
             if not param.requires_grad or param in seen_params:
                 continue
-            if name in layernorm_names or name.endswith("bias"):
+            if (name in layernorm_names) or (name in embedding_names) or name.endswith("bias"):
                 no_decay_params.append(param)
             else:
                 decay_params.append(param)
@@ -321,7 +349,7 @@ class Trainer(TrainerBase):
         self.optimizer = optim.AdamW(params=[
             {"params": decay_params, "weight_decay": 0.01},
             {"params": no_decay_params, "weight_decay": 0.0},
-        ], lr=self.config.training.learning_rate)
+        ], lr=self.config.training.learning_rate, betas=self.config.training.optimizer_beta)
 
         # 确认参数是否被遗漏
         all_param_set = set(p for g in self.optimizer.param_groups for p in g["params"])
@@ -343,18 +371,23 @@ class Trainer(TrainerBase):
         """Initialize the loss function"""
         pass
 
+    def init_auxiliary_loss(self):
+        """Initialize auxiliary loss functions if needed"""
+        # TODO: 需要添加辅助损失函数
+        pass
+
     def init_scheduler(self):
         """
         Initialize the learning rate scheduler
         :return:
         """
-        num_warmup_steps = math.ceil(self._buffer.epoch_size.train.optimizer * self.config.training.warmup_ratio)
+        num_warmup_steps = math.ceil(self.epoch_size.train.optimizer_steps * self.config.training.warmup_ratio)
 
         self.scheduler = get_scheduler(
             name='linear',
             optimizer=self.optimizer,
             num_warmup_steps=num_warmup_steps,
-            num_training_steps=int(self._buffer.epoch_size.train.optimizer * self.config.training.num_epochs),
+            num_training_steps=int(self.epoch_size.train.optimizer_steps * self.config.training.num_epochs),
         )
         self.logger.info(f'Warmup steps: {num_warmup_steps} ({self.config.training.warmup_ratio:.2%} of one epoch)')
 
@@ -362,6 +395,13 @@ class Trainer(TrainerBase):
             self.logger.info('Loading scheduler state from checkpoint ... ', newline=False)
             self.scheduler.load_state_dict(self.checkpoint['state']['scheduler'])
             self.logger.append(f'>>> Done <<<', level='INFO', newline=True)
+
+    @property
+    def is_warmup(self) -> bool:
+        """Check if currently in the warmup phase."""
+        current_step = self.training_tracker.batch.total_batches
+        num_warmup_steps = math.ceil(self.epoch_size.train.optimizer_steps * self.config.training.warmup_ratio)
+        return current_step < num_warmup_steps
 
     def unpack_dataset(self, dataset: pandas.DataFrame) -> tuple[list[numpy.ndarray], list[numpy.ndarray]]:
         """Unpack dataset into inputs and labels"""
@@ -406,22 +446,18 @@ class Trainer(TrainerBase):
             )
         gc.collect()
 
-        self._buffer.dataset.train_samples = len(x_train)
-        self._buffer.dataset.valid_samples = len(x_test)
+        self.set_dataset_size(train_samples=len(x_train), valid_samples=len(x_test))
 
-        self._buffer.epoch_size.train.micro = math.ceil(self._buffer.dataset.train_samples / self.config.training.batch_size)
-        self._buffer.epoch_size.train.optimizer = math.ceil(self._buffer.epoch_size.train.micro / (distributed.get_world_size() if self.is_distributed else 1) / self.config.training.grad_accum_steps)
-        self._buffer.epoch_size.valid = math.ceil(self._buffer.dataset.valid_samples / self.config.training.batch_size)
         if self.config.training.quick_eval_per_epoch > 0:
             eval_steps: set[int] = {
-                round(self._buffer.epoch_size.train.optimizer * i / (self.config.training.quick_eval_per_epoch + 1))
+                round(self.epoch_size.train.optimizer_steps * i / (self.config.training.quick_eval_per_epoch + 1))
                 for i in range(1, self.config.training.quick_eval_per_epoch + 1)  # 1 ... quick_eval_per_epoch
             }
             eval_steps.discard(0)
-            eval_steps.discard(self._buffer.epoch_size.train.optimizer)
-            self._buffer.eval_optimizer_steps = eval_steps
+            eval_steps.discard(self.epoch_size.train.optimizer_steps)
+            self._buffer.eval_steps = eval_steps
 
-        self.logger.info(f'Loaded dataset: {self._buffer.dataset.train_samples} training samples, {self._buffer.dataset.valid_samples} validation samples')
+        self.logger.info(f'Loaded dataset: {self._buffer.dataset_size.train} training samples, {self._buffer.dataset_size.valid} validation samples')
 
         if not isinstance(self.config.training.grad_accum_steps, int):
             self.logger.critical('grad_accum_steps must be an integer.')
@@ -438,23 +474,23 @@ class Trainer(TrainerBase):
             self.logger.critical('Batch size must be an integer.')
             raise ValueError('Batch size must be an integer.')
 
-        self.logger.info(f'Epoch size: {self._buffer.epoch_size.train.optimizer}.')
+        self.logger.info(f'Epoch size: {self.epoch_size.train.optimizer_steps}.')
         # 计算等效批次大小
         if self.is_distributed:
             if self.config.training.grad_accum_steps > 1:
-                self.logger.info(f' - Global micro-step batch size: {self._buffer.batch_size.step_batch_size}')
+                self.logger.info(f' - Global step batch size: {self.step_batch_size}')
                 self.logger.info(f' - Gradient accumulation steps: {self.config.training.grad_accum_steps}')
-                self.logger.info(f' - Optimizer step batch size: {self._buffer.batch_size.optimizer_batch_size}')
+                self.logger.info(f' - Optimizer step batch size: {self.optimizer_batch_size}')
             else:
-                self.logger.info(f' - Batch size: {self._buffer.batch_size.step_batch_size}')
-            self.logger.info(f' - Per-GPU step size: {self.config.training.batch_size}')
+                self.logger.info(f' - Batch size: {self.step_batch_size}')
+            self.logger.info(f' - Per-GPU step size: {self.micro_batch_size}')
         else:
             if self.config.training.grad_accum_steps > 1:
-                self.logger.info(f' - Micro-step batch size: {self._buffer.batch_size.step_batch_size}')
+                self.logger.info(f' - Step batch size: {self.step_batch_size}')
                 self.logger.info(f' - Gradient accumulation steps: {self.config.training.grad_accum_steps}')
-                self.logger.info(f' - Optimizer step batch size: {self._buffer.batch_size.optimizer_batch_size}')
+                self.logger.info(f' - Optimizer step batch size: {self.optimizer_batch_size}')
             else:
-                self.logger.info(f' - Batch size: {self._buffer.batch_size.step_batch_size}')
+                self.logger.info(f' - Batch size: {self.step_batch_size}')
 
         self.logger.info('Loading DataLoader ... ', newline=False)
         # 记录开始时间
@@ -467,7 +503,7 @@ class Trainer(TrainerBase):
             shuffle=True,
         ) if self.is_distributed else None
 
-        self.data_loader.train = DataLoader(
+        train_dataloader = DataLoader(
             dataset=train_dataset,
             batch_size=self.config.training.batch_size,
             sampler=train_sampler,
@@ -477,8 +513,9 @@ class Trainer(TrainerBase):
             persistent_workers=is_fork_supported(),
             shuffle=not self.is_distributed,
         )
+        valid_dataloader = None
         if self.is_main_process:
-            self.data_loader.valid = DataLoader(
+            valid_dataloader = DataLoader(
                 dataset=valid_dataset,
                 batch_size=self.config.training.batch_size,
                 collate_fn=self.batch_preprocess,
@@ -487,6 +524,7 @@ class Trainer(TrainerBase):
                 persistent_workers=is_fork_supported(),
                 shuffle=False
             )
+        self.data_loader = TrainerDataloader(train=train_dataloader, valid=valid_dataloader,)
         self.logger.append(f'>>> Done <<< (in {time.time() - load_start_time:.2f} seconds)', level='INFO', newline=True)
 
     def batch_preprocess(self, batch: list[tuple[torch.LongTensor, torch.LongTensor]]) -> tuple[BatchEncoding, torch.Tensor]:
@@ -581,9 +619,9 @@ class Trainer(TrainerBase):
                 'loss': self.training_tracker.loss.valid.avg,
             },
             'dataset': {
-                'total_samples': self._buffer.dataset.train_samples + self._buffer.dataset.valid_samples,
-                'train_samples': self._buffer.dataset.train_samples,
-                'valid_samples': self._buffer.dataset.valid_samples,
+                'total_samples': self._buffer.dataset_size.train + self._buffer.dataset_size.valid,
+                'train_samples': self._buffer.dataset_size.train,
+                'valid_samples': self._buffer.dataset_size.valid,
             },
             'trainer': {
                 'version': self.VERSION,
@@ -630,6 +668,45 @@ class Trainer(TrainerBase):
         """
         raise NotImplementedError('compute_loss method must be implemented in subclasses.')
 
+    def compute_auxiliary_loss(
+        self,
+        logits: torch.Tensor,
+        labels: torch.LongTensor,
+        shift_mod: Literal['internal', 'external'] = 'internal',
+    ) -> torch.Tensor:
+        """
+        Compute auxiliary loss if needed
+        Returns:
+            torch.Tensor: Auxiliary loss tensor
+        """
+        loss = torch.tensor(0.0, device=self.device)
+        if self.config.training.auxiliary_loss.weight <= 0: return loss
+
+        if shift_mod == 'internal':
+            # 内部 shift，需要同步调整 labels 以对齐模型内部的 shift 方式
+            labels = nn.functional.pad(labels, (0, 1), value=-100)
+            labels = labels[..., 1:].contiguous()
+
+        recent_ul_window_size = self.config.training.auxiliary_loss.recent_unlikelihood['window_size']
+        recent_ul_max_neg_per_pos = self.config.training.auxiliary_loss.recent_unlikelihood['max_neg_per_pos']
+        if recent_ul_window_size > 0 and recent_ul_max_neg_per_pos > 0:
+            pos_flat, neg_ids = build_recent_unlikelihood_negative_samples(
+                input_ids=labels,
+                window_size=recent_ul_window_size,
+                max_neg_per_pos=recent_ul_max_neg_per_pos,
+                ignore_token_ids={
+                    self.tokenizer.pad_token_id, self.tokenizer.bos_token_id, self.tokenizer.eos_token_id, -100
+                },
+                chunk=512,
+            )
+
+            loss += compute_unlikelihood_loss_from_negatives(
+                predictions=logits,
+                neg_pos=pos_flat, neg_ids=neg_ids,
+            )
+
+        return self.config.training.auxiliary_loss.weight * loss
+
     def clip_grads(self):
         """
         Clip gradients if necessary and log clipping stats
@@ -646,7 +723,7 @@ class Trainer(TrainerBase):
                 clip_scale = min(1.0, self.config.training.gradient_clipping_max_norm / (raw_total_norm + 1e-6))
             self.training_tracker.grad_clip_meter.step(is_clipped=is_clipped, clip_scale=clip_scale)
 
-    def step(self, batch_idx: int, inputs: BatchEncoding, labels: Optional[torch.LongTensor] = None) -> tuple[torch.Tensor, float, float]:
+    def step(self, batch_idx: int, inputs: BatchEncoding, labels: torch.LongTensor | None = None) -> tuple[torch.Tensor, float, float, float]:
         """
         One training/evaluation step
         Args:
@@ -654,7 +731,7 @@ class Trainer(TrainerBase):
             inputs (BatchEncoding): Input batch
             labels (Optional[torch.LongTensor]): Label batch
         Returns:
-            tuple[torch.Tensor, float, float]: Logits, loss, perplexity
+            tuple[torch.Tensor, float, float, float]: Logits, loss, perplexity, auxiliary loss
         """
         if self.model.training:
             # 每个 rank 实际能看到的 micro-batch 数
@@ -670,7 +747,6 @@ class Trainer(TrainerBase):
             if is_opt_step:
                 # 这里的 total_batches 就是“优化器步”的计数
                 self.training_tracker.batch.next()
-            is_warmup_step = math.ceil(self._buffer.epoch_size.train.optimizer * self.config.training.warmup_ratio) > self.training_tracker.batch.total_batches
             current_step_lr = self.optimizer.param_groups[0]['lr']
 
             ddp_context = (self.model.no_sync() if self.is_distributed and not is_opt_step else nullcontext())
@@ -688,10 +764,18 @@ class Trainer(TrainerBase):
                 else:
                     loss = outputs.loss
 
+                # 记录原始损失
+                original_loss = loss
+                if self.config.training.auxiliary_loss.weight > 0:
+                    loss = loss + self.compute_auxiliary_loss(
+                        logits=outputs.logits,
+                        labels=labels if labels is not None else inputs.labels,
+                        shift_mod='internal' if labels is None else 'external',
+                    )  # 如果有辅助损失则加上
+
                 # 反向传播和权重更新
                 if self.model.training:
                     scaled_loss = loss / accum_steps  # 梯度累积时需要除以累积步数
-
                     with ddp_context:
                         if self.base_model.config.dtype in [torch.bfloat16]: scaled_loss.backward()
                         else: self.scaler.scale(scaled_loss).backward()
@@ -708,7 +792,7 @@ class Trainer(TrainerBase):
                             self.scaler.step(self.optimizer)
                             self.scaler.update()
                         # 如果当前处于 warmup 阶段或者学习率没有降到最低值以下，才更新学习率
-                        if is_warmup_step or current_step_lr > self.config.training.min_learning_rate:
+                        if self.is_warmup or current_step_lr > self.config.training.min_learning_rate:
                             self.scheduler.step()
         else:
             outputs = self.model(**inputs)
@@ -721,6 +805,15 @@ class Trainer(TrainerBase):
             else:
                 loss = outputs.loss
 
+            # 记录原始损失
+            original_loss = loss
+            if self.config.training.auxiliary_loss.weight > 0:
+                loss = loss + self.compute_auxiliary_loss(
+                    logits=outputs.logits,
+                    labels=labels if labels is not None else inputs.labels,
+                    shift_mod='internal' if labels is None else 'external',
+                )  # 如果有辅助损失则加上
+
             # 反向传播和权重更新
             if self.model.training:
                 scaled_loss = loss / accum_steps  # 梯度累积时需要除以累积步数
@@ -732,10 +825,10 @@ class Trainer(TrainerBase):
                     if self.config.training.gradient_clipping_max_norm > 0:
                         self.clip_grads()
                     self.optimizer.step()
-                    if is_warmup_step or current_step_lr > self.config.training.min_learning_rate:
+                    if self.is_warmup or current_step_lr > self.config.training.min_learning_rate:
                         self.scheduler.step()
 
-        ppl = math.exp(loss.item())
+        ppl = math.exp(original_loss.item())
 
         if self.is_main_process and self.model_probe.active:
             self.model_probe.compute_output_distribution_metrics(
@@ -751,7 +844,7 @@ class Trainer(TrainerBase):
                 max_tokens=128,
             )
 
-        return outputs.logits.detach(), loss.detach().item(), ppl
+        return outputs.logits.detach(), original_loss.detach().item(), ppl, loss.detach().item()
 
     @torch.no_grad()
     def inference_samples(self):
@@ -767,7 +860,7 @@ class Trainer(TrainerBase):
             quick_test: Whether to perform a quick test (only config.batch_size batches)
         """
         if not self.is_main_process: return
-        if self._buffer.dataset.valid_samples <= 0 or not hasattr(self.data_loader, 'valid'):
+        if self._buffer.dataset_size.valid <= 0 or not hasattr(self.data_loader, 'valid'):
             # self.logger.warning('No validation dataset found, skipping evaluation.')
             self.save_model()
             self.inference_samples()
@@ -796,7 +889,7 @@ class Trainer(TrainerBase):
                 if label_batch is not None:
                     label_batch = label_batch.to(self.device)
                 try:
-                    logits, batch_loss, ppl = self.step(
+                    logits, batch_loss, ppl, aux_loss = self.step(
                         batch_idx=batch_idx,
                         inputs=input_batch.to(self.device),
                         labels=label_batch,
@@ -868,11 +961,11 @@ class Trainer(TrainerBase):
 
         self.model.train()
 
-        # 优化器步累积映射
-        accum_step_map: DotDict = DotDict({
-            'loss': deque(maxlen=max(1, self.config.training.grad_accum_steps)),
-            'ppl': deque(maxlen=max(1, self.config.training.grad_accum_steps)),
-        })
+        # 优化器步训练指标累加器
+        train_metrics_accumulator: TrainMetricsAccumulator = TrainMetricsAccumulator(
+            loss=deque(maxlen=max(1, self.config.training.grad_accum_steps)),
+            ppl=deque(maxlen=max(1, self.config.training.grad_accum_steps)),
+        )
 
         # 等待1秒确保所有的输出缓冲区均已刷新
         time.sleep(1)
@@ -881,7 +974,7 @@ class Trainer(TrainerBase):
         speed_time = time.time()
 
         with tqdm(
-            total=self._buffer.epoch_size.train.optimizer,
+            total=self.epoch_size.train.optimizer_steps,
             unit='step',
             desc=f'Training - Epoch {self.training_tracker.epoch()}',
             postfix={'Loss': 0, 'LR': f'{self.optimizer.param_groups[0]['lr']:.6f}'},
@@ -903,15 +996,15 @@ class Trainer(TrainerBase):
                 if label_batch is not None:
                     label_batch = label_batch.to(self.device, non_blocking=True if self.data_loader.train.pin_memory else False)
                 try:
-                    logits, batch_loss, ppl = self.step(
+                    logits, batch_loss, ppl, aux_loss = self.step(
                         batch_idx=batch_idx,
                         inputs=input_batch.to(self.device, non_blocking=True if self.data_loader.train.pin_memory else False),
                         labels=label_batch,
                     )
 
                     # 更新累积步映射
-                    accum_step_map.loss.append(batch_loss)
-                    accum_step_map.ppl.append(ppl)
+                    train_metrics_accumulator.loss.append(batch_loss)
+                    train_metrics_accumulator.ppl.append(ppl)
                 except torch.OutOfMemoryError as oom_error:
                     self.logger.warning('Out of memory error occurred.')
                     if self.is_distributed:
@@ -963,7 +1056,7 @@ class Trainer(TrainerBase):
                     # 已训练的总批次数减去起始批次数代表本次训练的实际总批次数
                     # 如果本次训练的实际总批次数还没有达到预设的warmup比例，则代表处于warmup阶段
                     # 相反如果已经超过warmup阶段但是触发学习率过低，则说明达到目标轮次停止训练
-                    if self.training_tracker.batch.total_batches - start_total_batches >= int(self._buffer.epoch_size.train.optimizer * self.config.training.warmup_ratio):
+                    if self.training_tracker.batch.total_batches - start_total_batches >= int(self.epoch_size.train.optimizer_steps * self.config.training.warmup_ratio):
                         self.logger.warning('Learning rate is too low, stopping training.')
                         if self.is_main_process: self.evaluate_epoch(quick_test=False)
                         # 退出训练
@@ -976,8 +1069,8 @@ class Trainer(TrainerBase):
                     self.model_probe.set_active(active=False)
 
                 if self.is_main_process and is_opt_step:
-                    avg_loss = sum(accum_step_map.loss) / len(accum_step_map.loss)
-                    avg_ppl = sum(accum_step_map.ppl) / len(accum_step_map.loss)
+                    avg_loss = train_metrics_accumulator.avg_loss
+                    avg_ppl = train_metrics_accumulator.avg_ppl
 
                     # 更新训练跟踪器
                     self.training_tracker.loss.train.step(loss=avg_loss)
@@ -1006,8 +1099,8 @@ class Trainer(TrainerBase):
                         pbar.set_postfix({'Loss': f'{avg_loss:.4f}', 'LR': f'{self.optimizer.param_groups[0]['lr']:.6f}'})
                         if self.config.training.gradient_clipping_max_norm > 0:
                             self.summary_writer.add_scalars(main_tag='Train/batch/GradClip', tag_scalar_dict={
-                                'ClipRate': self.training_tracker.grad_clip_meter.clip_rate,  # 最近 1k 优化器步的梯度裁剪应用率
-                                'AvgClipScale': self.training_tracker.grad_clip_meter.avg_clip_scale,  # 最近 1k 优化器步的平均裁剪比例
+                                'ClipRate': self.training_tracker.grad_clip_meter.clip_rate,  # 最近 100 优化器步的梯度裁剪应用率
+                                'AvgClipScale': self.training_tracker.grad_clip_meter.avg_clip_scale,  # 最近 100 优化器步的平均裁剪比例
                             }, global_step=self.training_tracker.batch.total_batches)
 
                     # 每 50 批次
@@ -1039,7 +1132,7 @@ class Trainer(TrainerBase):
                         )
 
                     # 每轮次验证 quick_eval_per_epoch 次
-                    if self._buffer.eval_optimizer_steps and opt_step in self._buffer.eval_optimizer_steps:
+                    if self._buffer.eval_steps and opt_step in self._buffer.eval_steps:
                         pbar.disable = True  # 禁用 tqdm 输出
                         self.evaluate_epoch(quick_test=True)
                         self.model.train()  # 确保恢复训练模式

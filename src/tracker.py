@@ -1,7 +1,6 @@
 from collections import deque
-from typing import Optional
-
-from .utils.type import DotDict
+from dataclasses import dataclass
+from typing import Optional, Generic, TypeVar
 
 
 class Counter:
@@ -246,21 +245,28 @@ class BatchCounter(Counter):
         self._total_batches = 0
 
 
+MeterType = TypeVar('MeterType', LossMeter, PPLMeter, GradClipMeter)
+
+
+@dataclass(slots=True)
+class SplitMeters(Generic[MeterType]):
+    train: MeterType
+    valid: MeterType
+
+
 class TrainingTracker:
     def __init__(self):
         self.epoch = Counter(counter_name='epoch')
         self.batch = BatchCounter()
-        self.loss = DotDict({
-            'train': LossMeter(windows=[1000, 3000, 5000]),
-            'valid': LossMeter(),
-            'test': LossMeter()
-        })
-        self.ppl_meter = DotDict({
-            'train': PPLMeter(windows=[1000, 3000, 5000]),
-            'valid': PPLMeter(windows=[1000, 3000, 5000]),
-            'test': PPLMeter(windows=[1000, 3000, 5000]),
-        })
-        self.grad_clip_meter = GradClipMeter(window=1000)
+        self.loss = SplitMeters[LossMeter](
+            train=LossMeter(windows=[1000, 3000, 5000]),
+            valid=LossMeter(),
+        )
+        self.ppl_meter = SplitMeters[PPLMeter](
+            train=PPLMeter(windows=[1000, 3000, 5000]),
+            valid=PPLMeter(windows=[1000, 3000, 5000]),
+        )
+        self.grad_clip_meter = GradClipMeter(window=100)
 
 
 __all__ = ['TrainingTracker']
