@@ -1,7 +1,10 @@
+import math
 from collections import deque
 from dataclasses import dataclass, field, asdict
 from typing import Literal, Mapping
 
+import torch
+from torch import nn
 from torch.utils.data import DataLoader
 
 from ..logger import LogLevel
@@ -21,8 +24,8 @@ class ModelConfig:
 class AuxiliaryLossConfig:
     weight: float = 0.0
     recent_unlikelihood: dict = field(default_factory=lambda: {
-        'window_size': 64,
-        'max_neg_per_pos': 8,
+        'window_size': 32,
+        'max_neg_per_pos': 12,
     })
 
 
@@ -162,6 +165,35 @@ class TrainMetricsAccumulator:
     def avg_loss(self) -> float: return sum(self.loss) / len(self.loss) if self.loss else float('inf')
     @property
     def avg_ppl(self) -> float: return sum(self.ppl) / len(self.ppl) if self.ppl else float('inf')
+
+
+@dataclass(frozen=True, slots=True)
+class TrainStepOutput:
+    logits: torch.Tensor
+    loss: torch.Tensor
+    auxiliary_loss: torch.Tensor | None = None
+
+    labels: torch.LongTensor | None = None
+    label_shift_mod: Literal['internal', 'external'] = 'internal'
+
+    micro_step: int | None = None
+    optimizer_step: int | None = None
+    lr: float | None = None
+
+    ignore_index: int = -100
+
+    @property
+    def ppl(self) -> float: return math.exp(self.loss.item())
+    @property
+    def auxiliary_ppl(self) -> float: return math.exp(self.auxiliary_loss.item()) if self.auxiliary_loss is not None else float('inf')
+    @property
+    def shift_labels(self) -> torch.LongTensor | None:
+        if self.labels is None: return None
+        if self.label_shift_mod == 'internal':
+            labels = nn.functional.pad(self.labels, (0, 1), value=self.ignore_index)
+            return labels[..., 1:].contiguous()
+        elif self.label_shift_mod == 'external': return self.labels
+        raise ValueError(f'Invalid label_shift_mod: {self.label_shift_mod}')
 
 
 @dataclass

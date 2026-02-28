@@ -17,6 +17,7 @@ class QiChatConfig(PretrainedConfig):
         d_ff: int = 2560,
         emb_dropout: float = 0.01,
         tie_word_embeddings: bool = True,
+        max_position_embeddings: int | None = None,
         rope_theta: int = 10000,
         rms_norm_eps: float = 1e-6,
         attn_dropout_rate: float = 0.01,
@@ -86,6 +87,7 @@ class QiChatConfig(PretrainedConfig):
 
         self.emb_dropout = emb_dropout
         self.tie_word_embeddings = tie_word_embeddings
+        self.max_position_embeddings = max_position_embeddings
         self.rope_theta = rope_theta
 
         self.rms_norm_eps = rms_norm_eps

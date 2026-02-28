@@ -287,8 +287,3 @@ def compute_unlikelihood_loss_from_negatives(
 
     ul_matrix = -torch.log1p(-p_neg)  # [N, K]
     return ul_matrix.sum() / valid.sum().clamp_min(1.0)
-
-
-class AuxLossComposer:
-    # TODO: 设计一个辅助损失组合器，支持多种辅助损失（如 token-level loss weighting、ngram unlikelihood、recent token unlikelihood 等）的配置和计算，并且能够灵活地将它们组合到主损失中。
-    pass

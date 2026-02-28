@@ -27,6 +27,8 @@ pip install -r requirements.txt
 - **训练步**：计算设备接受的最小训练单位，也称 `micro-step`，每步会处理一个批次的数据。
 - **优化步**：模型权重更新步，也称 `opt-step`（优化器步），计算公式为 `micro-step x grad_accum_steps`，故：当 grad_accum_steps 为 1 时训练步 = 优化步。
 - **DDP**：分布式数据并行（Distributed Data Parallel）。
+- **检查点**：训练过程中保存的模型权重和训练状态的快照，通常在训练过程中定期保存，以便在需要时恢复训练或进行评估。
+- **Unlikelihood**：非似然，简称 `UL`，一种辅助损失的实现，用于弥补最大化似然(MLE)训练的缺陷，提高生成模型的多样性并降低重复率，详见[损失函数](#损失函数)部分。
 
 ---
 
@@ -93,6 +95,11 @@ python scripts/qwen3_pretrain.py [--nprocs N]
   - `freeze_layers`: 冻结前 n 层参数不进行训练，设置为 0 则不冻结。
   - `freeze_embeddings`: 是否冻结词嵌入层参数不进行训练。
   - `grad_accum_steps`: 梯度累积步数，每 n 训练步进行一次梯度更新。
+  - `auxiliary_loss`:
+    - `weight`: 辅助损失权重，设置为 0 则不使用辅助损失，计算公式为 `loss = ce_loss + (auxiliary_loss_weight * total_auxiliary_loss)`。
+    - `recent_unlikelihood`: recent-token Unlikelihood Loss 配置
+      - `window_size`: Recent UL 的窗口大小，即 w 的值。
+      - `max_neg_per_pos`: Recent UL 的惩罚范围 k 的最大值。
 - `seed`: 随机种子，设置为固定值以确保训练过程的可复现性。
 - `dataset`
   - `max_input_length`: 最大输入长度，超过该长度的输入将被舍弃，设置为 -1 则不限制。
@@ -130,11 +137,50 @@ python scripts/qwen3_pretrain.py [--nprocs N]
 
 ### 训练器
 
-本项目参考了 [Qwen3](https://arxiv.org/abs/2505.09388) 的数据处理方式，
+本项目参考了 Qwen3 的数据处理方式，
 简单来说就是未在数据集中使用 BOS（begin of sequence）标记，同时又不想因为这一变化设计一个功能开关，所以在训练器的预训练、监督微调训练中做了一个特殊处理，具体可在 inference_samples 函数中了解。
 
 ---
 
-## 📄 许可证
+### 损失函数
+
+#### recent-token Unlikelihood Loss
+
+Recent-token Unlikelihood Loss 是基于原版 Unlikelihood Training（非似然训练）的一种改良实现。
+根据试验，发现由于 MLE 目标下的 CE Loss 缺陷，导致即便模型在 top-k 指标还不错的情况下，在遇到吸引子后叠加自我强化（self-reinforcement），易导致生成文本的多样性不足和重复率过高问题。
+
+Recent-token Unlikelihood Loss 的核心思想是：在训练过程中，除了最大化正确 token 的似然之外，还引入一个辅助损失，在 CE 抬高 gold token 的概率的同时，压低吸引子的输出欲望，可激励模型打断自我强化的循环，
+
+经过试验，发现吸引子通常来自 t 之前的位置，意味着模型的吸引子并非完全由模型主动生成再吸引自己（尤其是教师强制训练下），且吸引子通常在 t 之前的 w 个时间步内，不会跨越更远的位置，
+因此 recent-token Unlikelihood Loss 的核心改良在于：
+
+- 无需手动设计吸引子列表，完全基于 gold token 进行计算，简化了实现和使用；
+- 可调的窗口大小 w，以及惩罚范围 k，尽可能不影响 MLE 目标；
+- 惩罚范围 k 采用“最近优先”原则，即在窗口内距离 t 越近的 token 越优先纳入惩罚范围，避免合理重复被抑制。
+
+---
+
+## References
+
+- [Qwen3 Technical Report](https://arxiv.org/abs/2505.09388)
+- [Neural Text Generation with Unlikelihood Training](https://arxiv.org/abs/1908.04319)
+
+---
+
+## Citation 引用
+
+If you use this project in your research, please consider citing:
+
+```bibtex
+@misc{QiChat,
+  title  = {QiChat: A General-Purpose Conversational Decoder-Only Language Model},
+  author = {Morton Li},
+  year   = {2026},
+}
+```
+
+---
+
+## 📄 License 许可
 
 本项目采用 **Apache 2.0** 许可。
