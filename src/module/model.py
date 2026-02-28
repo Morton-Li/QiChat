@@ -56,7 +56,8 @@ class QiChatRotaryPositionEmbedding(nn.Module):
     def __init__(
         self,
         dim: int,
-        base: float = 10000.0,
+        base: int = 10000,
+        max_position_embeddings: int | None = None,
         dtype: torch.dtype = torch.bfloat16
     ):
         """
@@ -67,10 +68,19 @@ class QiChatRotaryPositionEmbedding(nn.Module):
         """
         super().__init__()
         assert dim % 2 == 0, "Rotary embedding requires even dimensions"
+
+        self.dim = dim
+        self.max_seq_len_cached: int | None = max_position_embeddings
         self.output_dtype = dtype
 
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))  # [dim/2]
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+        if self.max_seq_len_cached is not None:
+            # 预先计算并缓存 cos 和 sin，以加速前向传播
+            position_ids = torch.arange(self.max_seq_len_cached, dtype=torch.long)  # [max_seq_len_cached]
+            freqs = position_ids[..., None] * inv_freq[None, :]  # [max_seq_len_cached, dim/2]
+            self.register_buffer("rope_table", torch.cat([freqs.cos(), freqs.sin()], dim=-1), persistent=False)
 
     def forward(self, position_ids: torch.LongTensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -84,12 +94,19 @@ class QiChatRotaryPositionEmbedding(nn.Module):
         """
         if position_ids.dim() != 2: raise ValueError(f"position_ids must be of shape (batch_size, seq_len), but got {position_ids.shape}")
 
-        with maybe_autocast(device_type=position_ids.device.type, enabled=False):  # Force float32
-            inv_freq_fp32 = self.inv_freq.to(device=position_ids.device, dtype=torch.float32)  # [dim/2]
-            position_ids_fp32 = position_ids.to(device=position_ids.device, dtype=torch.float32)  # [batch_size, seq_len]
+        if self.max_seq_len_cached is not None:
+            if position_ids.max() >= self.max_seq_len_cached:
+                raise ValueError(f"position_ids contains values greater than max_seq_len_cached ({self.max_seq_len_cached}). Consider increasing max_position_embeddings or ensure that position_ids are within the cached range.")
+            # 无需提升精度，完全依赖初始化时的缓存精度
+            rope_emb = nn.functional.embedding(position_ids, self.rope_table)  # [batch_size, seq_len, dim]
+            cos, sin = rope_emb.split(self.dim // 2, dim=-1)  # [batch_size, seq_len, dim/2], [batch_size, seq_len, dim/2]
+        else:
+            with maybe_autocast(device_type=position_ids.device.type, enabled=False):  # Force float32
+                inv_freq_fp32 = self.inv_freq.to(device=position_ids.device, dtype=torch.float32)  # [dim/2]
+                position_ids_fp32 = position_ids.to(device=position_ids.device, dtype=torch.float32)  # [batch_size, seq_len]
 
-            freqs = position_ids_fp32[..., None] * inv_freq_fp32[None, None, :]  # [batch_size, seq_len, dim/2]
-            cos, sin = freqs.cos(), freqs.sin()  # [batch_size, seq_len, dim/2]
+                freqs = position_ids_fp32[..., None] * inv_freq_fp32[None, None, :]  # [batch_size, seq_len, 1] * (1, 1, dim/2) -> [batch_size, seq_len, dim/2]
+                cos, sin = freqs.cos(), freqs.sin()  # [batch_size, seq_len, dim/2]
 
         return cos.to(dtype=self.output_dtype), sin.to(dtype=self.output_dtype)
 
@@ -165,6 +182,10 @@ class QiChatAttention(nn.Module):
         self.v_proj = nn.Linear(in_features=self.config.d_model, out_features=proj_dim_kv, bias=False)
         self.o_proj = nn.Linear(in_features=proj_dim_qo, out_features=self.config.d_model, bias=False)
 
+        # QK-Norm
+        self.q_norm = nn.RMSNorm(normalized_shape=self.config.d_kv, eps=self.config.rms_norm_eps)
+        self.k_norm = nn.RMSNorm(normalized_shape=self.config.d_kv, eps=self.config.rms_norm_eps)
+
     def forward(
         self,
         hidden_states: torch.FloatTensor,
@@ -210,8 +231,8 @@ class QiChatAttention(nn.Module):
             raise ValueError(f'cos_buf and sin_buf must have shape (batch_size, seq_len, d_kv/2), but got {cos_buf.shape} and {sin_buf.shape}')
 
         # QKV projection
-        query_states = self.q_proj(hidden_states).view(batch_size, seq_len, self.config.n_heads, self.config.d_kv).transpose(1, 2)       # [batch_size, n_heads, seq_len, d_kv]
-        key_states = self.k_proj(hidden_states).view(batch_size, seq_len, self.config.n_kv_heads, self.config.d_kv).transpose(1, 2)    # [batch_size, n_kv_heads, seq_len, d_kv]
+        query_states = self.q_norm(self.q_proj(hidden_states).view(batch_size, seq_len, self.config.n_heads, self.config.d_kv)).transpose(1, 2)       # [batch_size, n_heads, seq_len, d_kv]
+        key_states = self.k_norm(self.k_proj(hidden_states).view(batch_size, seq_len, self.config.n_kv_heads, self.config.d_kv)).transpose(1, 2)    # [batch_size, n_kv_heads, seq_len, d_kv]
         value_states = self.v_proj(hidden_states).view(batch_size, seq_len, self.config.n_kv_heads, self.config.d_kv).transpose(1, 2)    # [batch_size, n_kv_heads, seq_len, d_kv]
 
         # Apply RoPE to Q and K
@@ -418,6 +439,7 @@ class QiChatModel(QiChatPreTrainedModel):
         self.rotary_pos_emb = QiChatRotaryPositionEmbedding(
             dim=config.d_kv,
             base=config.rope_theta,
+            max_position_embeddings=config.max_position_embeddings,
             dtype=config.dtype,  # 输出精度，该模块内部会提升精度以保证数值稳定性，然后再转换回与模型一致的精度参与计算
         )
 

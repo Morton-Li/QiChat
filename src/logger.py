@@ -1,7 +1,7 @@
 import datetime
 import os
 import threading
-from typing import Optional
+from typing import Optional, Literal
 
 from .utils.path import log_path
 
@@ -11,9 +11,10 @@ from .utils.path import log_path
 # WARNING: 警告
 # ERROR: 错误
 # CRITICAL: 严重错误
+LogLevel = Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
 
 # 日志级别及其对应的名称和颜色
-LOG_LEVELS = {
+LOG_LEVELS_MAP = {
     1: {"name": "DEBUG", "color": "\033[0;36m"},    # Cyan
     2: {"name": "INFO", "color": "\033[0;32m"},     # Green
     3: {"name": "WARNING", "color": "\033[0;33m"},  # Yellow
@@ -26,7 +27,7 @@ RESET_COLOR = "\033[0m"
 class Logger:
     def __init__(
         self,
-        log_level: int | str = 2,  # 默认日志级别为 INFO
+        log_level: int | LogLevel = 2,  # 默认日志级别为 INFO
         log_filename: Optional[str] = None,
     ):
         self.log_level = 2  # 默认日志级别
@@ -48,30 +49,30 @@ class Logger:
             int: The numeric value of the log level.
         """
         # 查找日志级别对应的数字
-        levels = LOG_LEVELS
+        levels = LOG_LEVELS_MAP
         levels = {v['name']: k for k, v in levels.items()}  # Reverse the dictionary to map names to numbers
         if log_level not in levels:
             raise ValueError(f"Invalid log level: {log_level}. Valid levels are: {', '.join(levels.keys())}")
         return levels.get(log_level.upper())  # Default to INFO level if not found
 
-    def set_level(self, level: int | str) -> 'Logger':
+    def set_level(self, level: int | LogLevel) -> 'Logger':
         if isinstance(level, str):
             level = self.get_log_level_number(level)
-        if level not in LOG_LEVELS:
+        if level not in LOG_LEVELS_MAP:
             raise ValueError(f"Invalid log level: {level}")
         self.log_level = level
         return self
 
     def log(self, message: str, level: int, newline: bool = True):
         if not self.is_enabled: return
-        if level not in LOG_LEVELS:
+        if level not in LOG_LEVELS_MAP:
             raise ValueError(f"Invalid log level: {level}")
         # 如果日志级别低于指定的日志级别，则不输出
         if level < self.log_level:
             return
 
         # 选择的日志级别
-        log_level_selected = LOG_LEVELS[level]
+        log_level_selected = LOG_LEVELS_MAP[level]
 
         # 构造日志消息
         log_message = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [{log_level_selected['name']}] {message}"
@@ -101,13 +102,13 @@ class Logger:
         """
         if not self.is_enabled: return
         level = self.get_log_level_number(level) if isinstance(level, str) else level
-        if level not in LOG_LEVELS:
+        if level not in LOG_LEVELS_MAP:
             raise ValueError(f"Invalid log level: {level}")
         # 如果日志级别低于指定的日志级别，则不输出
         if level < self.log_level:
             return
 
-        log_level_selected = LOG_LEVELS[level]
+        log_level_selected = LOG_LEVELS_MAP[level]
 
         with self.lock:
             # 如果指定了文件名，并且格式为str，则将日志写入文件
@@ -136,4 +137,4 @@ def get_logger(log_filename: Optional[str] = "app.log", log_level: int | str = '
         return _logger_instance
 
 
-__all__ = ["Logger", "get_logger"]
+__all__ = ["Logger", "get_logger", "LogLevel"]
