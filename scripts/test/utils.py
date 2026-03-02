@@ -1,6 +1,6 @@
 import os
 import random
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy
 import torch
@@ -51,9 +51,9 @@ def get_device(device: Literal['auto', 'cuda', 'mps', 'cpu']) -> torch.device:
 def init_model(
     param_size: Literal['Tiny', '73M', '0.3B', '0.6B', '1.3B', '3.2B'] = 'Tiny',
     attn_implementation: Literal['eager', 'memory_efficient', 'sdpa', 'flash_attention_2', 'flash_attention_3'] = 'flash_attention_2',
-    dtype: Literal['float16', 'bfloat16', 'float32'] = 'bfloat16',
-    additional_model_config_kwargs: Optional[dict] = None,
-    checkpoint: Optional[dict] = None,
+    dtype: Literal['float16', 'bfloat16', 'float32'] | torch.dtype = 'bfloat16',
+    additional_model_config_kwargs: dict | None = None,
+    checkpoint: dict | None = None,
     use_device: Literal['auto', 'cuda', 'mps', 'cpu'] | torch.device | None = None,
 ) -> QiChatForCausalLM:
     """
@@ -90,7 +90,7 @@ def init_model(
     return model
 
 
-def load_model_checkpoint(map_location: Optional[str|torch.device] = None) -> dict:
+def load_model_checkpoint(map_location: str | torch.device | None = None) -> dict:
     """Load the latest model checkpoint for inference."""
     checkpoint_path = data_path('checkpoint')
     checkpoint_list = [
