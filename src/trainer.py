@@ -1,3 +1,17 @@
+# Copyright 2026 Morton Li. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import gc
 import math
 import os
@@ -146,7 +160,7 @@ class TrainerBase:
 
 class Trainer(TrainerBase):
     """ QiChat Trainer """
-    VERSION = '1.6.0'
+    VERSION = '1.6.1'
     TASK_TYPE: Literal['PreTraining', 'FineTuning']
 
     def __init__(self, *args, **kwargs):
@@ -418,9 +432,15 @@ class Trainer(TrainerBase):
         self.logger.append(message=f'>>> Loaded {len(dataset_df)} records on {len(dataset_file_list)} files <<<', level='INFO', newline=True)
 
         # 删除过长的样本
-        if self.config.dataset.max_input_length > 0:
+        max_input_length = self.base_model.config.max_position_embeddings  # 金标准
+        if max_input_length is None: max_input_length = self.config.dataset.max_input_length
+        elif self.config.dataset.max_input_length > max_input_length:
+            self.logger.warning(f'Model max_position_embeddings ({max_input_length}) is smaller than config max_input_length ({self.config.dataset.max_input_length}). Using model max_position_embeddings as the effective max_input_length.')
+        elif max_input_length > self.config.dataset.max_input_length > 0: max_input_length = self.config.dataset.max_input_length
+
+        if max_input_length > 0:
             original_length = len(dataset_df)
-            dataset_df = dataset_df[(dataset_df[self.config.dataset.field_name].apply(len) <= self.config.dataset.max_input_length)].reset_index(drop=True)
+            dataset_df = dataset_df[(dataset_df[self.config.dataset.field_name].apply(len) <= max_input_length)].reset_index(drop=True)
             if len(dataset_df) != original_length:
                 self.logger.warning(f'Deleted {original_length - len(dataset_df)} samples that are too long')
 

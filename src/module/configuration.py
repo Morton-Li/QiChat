@@ -1,10 +1,19 @@
 from typing import Literal
 
+import torch
 from transformers import PretrainedConfig
+from transformers.configuration_utils import layer_type_validation
 
 
 class QiChatConfig(PretrainedConfig):
     model_type = "QiChat"
+
+    keys_to_ignore_at_inference = ['past_key_values']
+    base_model_pp_plan = {
+        'word_emb': (['input_ids', 'mask'], ['hidden_states']),
+        'blocks': (['hidden_states', 'mask'], ['hidden_states']),
+        'final_layer_norm': (['hidden_states'], ['hidden_states']),
+    }
 
     def __init__(
         self,
@@ -29,7 +38,7 @@ class QiChatConfig(PretrainedConfig):
         bos_token_id: int = 0,
         eos_token_id: int = 1,
         pad_token_id: int = 3,
-        dtype: str = 'bfloat16',
+        dtype: str | torch.dtype = 'bfloat16',
         **kwargs,
     ):
         """
@@ -57,7 +66,7 @@ class QiChatConfig(PretrainedConfig):
             eos_token_id (int): End of sequence token ID
             pad_token_id (int): Padding token ID
             decoder_start_token_id (int): Decoder start token ID
-            dtype (str): Data type for model weights
+            dtype (str | torch.dtype): Data type for model weights
         """
         super().__init__(
             tokenizer_class=tokenizer_class,
@@ -75,6 +84,10 @@ class QiChatConfig(PretrainedConfig):
         assert d_model % 2 == 0, "d_model must be an even number"
         self.d_model = d_model
         self.num_hidden_layers = num_hidden_layers
+        self.layer_types = [
+            'full_attention' for _ in range(num_hidden_layers)
+        ]
+        layer_type_validation(self.layer_types, self.num_hidden_layers)
         assert d_model % n_heads == 0, "d_model must be divisible by num_heads"
         self.n_heads = n_heads
         assert d_kv == d_model // n_heads, "d_kv must equal d_model // n_heads"

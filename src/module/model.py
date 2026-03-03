@@ -1,3 +1,17 @@
+# Copyright 2026 Morton Li. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Optional
 
 import torch
@@ -95,7 +109,9 @@ class QiChatRotaryPositionEmbedding(nn.Module):
         if position_ids.dim() != 2: raise ValueError(f"position_ids must be of shape (batch_size, seq_len), but got {position_ids.shape}")
 
         if self.max_seq_len_cached is not None:
-            if position_ids.max() >= self.max_seq_len_cached:
+            # mps 上的 embedding 操作在输入索引超出预先缓存的范围时*不*会抛出错误，因此在这里进行检查
+            # position_ids.max() 会触发 GPU 同步极大影响性能，建议在使用 MPS 设备时将 max_position_embeddings 设置为 None 以使用动态计算方式实现。
+            if position_ids.device.type == 'mps' and position_ids.max() >= self.max_seq_len_cached:
                 raise ValueError(f"position_ids contains values greater than max_seq_len_cached ({self.max_seq_len_cached}). Consider increasing max_position_embeddings or ensure that position_ids are within the cached range.")
             # 无需提升精度，完全依赖初始化时的缓存精度
             rope_emb = nn.functional.embedding(position_ids, self.rope_table)  # [batch_size, seq_len, dim]
@@ -533,7 +549,7 @@ class QiChatModel(QiChatPreTrainedModel):
 
             attention_mask = create_causal_mask(
                 config=self.config,
-                input_embeds=hidden_states,
+                inputs_embeds=hidden_states,
                 attention_mask=attention_mask,
                 cache_position=cache_position,
                 past_key_values=past_key_values,
@@ -544,7 +560,7 @@ class QiChatModel(QiChatPreTrainedModel):
 
             attention_mask = create_causal_mask(
                 config=self.config,
-                input_embeds=hidden_states,
+                inputs_embeds=hidden_states,
                 attention_mask=attention_mask,
                 cache_position=torch.arange(0, seq_len, device=use_device),  # [seq_len] 绝对位置索引,
                 past_key_values=past_key_values,
@@ -652,6 +668,8 @@ class QiChatCausalLMHead(nn.Module):
 class QiChatForCausalLM(QiChatPreTrainedModel, GenerationMixin):
     """ QiChat model with a language modeling head for causal language modeling. """
     _tied_weights_keys = {'lm_head.dense.weight': 'model.word_emb.word_embeddings.weight'}
+
+    _pp_plan = {'lm_head': (['hidden_states'], ['logits'])}
 
     def __init__(self, config: PretrainedConfig):
         super().__init__(config=config)
