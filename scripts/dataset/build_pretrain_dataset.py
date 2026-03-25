@@ -30,7 +30,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from src.tokenizer import QiTianTokenizerFast, get_tokenizer
 from src.utils.path import data_path
-from scripts.dataset.utils import stream_corpus_batches, auto_select_precision_from_range, generate_report, split_corpus
+from scripts.dataset.utils import iter_parquet_batches, auto_select_precision_from_range, generate_report, split_corpus
 
 
 def process_corpus_file(
@@ -46,7 +46,7 @@ def process_corpus_file(
     buffer_list: list[str] = []
     chunk_file_list: list[Path] = []
 
-    for batch in stream_corpus_batches(parquet_path=parquet_path, batch_size=2048, text_field=text_field):
+    for batch in iter_parquet_batches(parquet_path=parquet_path, batch_size=2048, text_field=text_field):
         batch = batch.astype('string').apply(lambda c: c.str.strip())  # 去除前后空白符
         batch = batch.stack()  # 展平为单列（MultiIndex）
         batch = batch.replace('', numpy.nan).dropna()  # 将空字符串替换为 NaN, 去除NaN并重置索引

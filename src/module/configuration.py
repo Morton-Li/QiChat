@@ -68,14 +68,16 @@ class QiChatConfig(PretrainedConfig):
             decoder_start_token_id (int): Decoder start token ID
             dtype (str | torch.dtype): Data type for model weights
         """
+
+        # 重新构造 kwargs
+        kwargs.setdefault('tokenizer_class', tokenizer_class)
+        kwargs.setdefault('bos_token_id', bos_token_id)
+        kwargs.setdefault('eos_token_id', eos_token_id)
+        kwargs.setdefault('pad_token_id', pad_token_id)
+        kwargs.setdefault('attn_implementation', attn_implementation)
+
         super().__init__(
-            tokenizer_class=tokenizer_class,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            pad_token_id=pad_token_id,
             dtype=dtype,  # 会自动转 torch.dtype
-            is_decoder=True,
-            attn_implementation=attn_implementation,
             return_dict=return_dict,
             **kwargs,
         )
