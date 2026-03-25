@@ -3,7 +3,7 @@ import random
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Generator, Any
+from typing import Iterator
 
 import numpy
 import pandas
@@ -14,7 +14,7 @@ from src.utils.masks import build_span_mask
 from src.utils.path import data_path
 
 
-def stream_corpus_batches(parquet_path: Path | str, batch_size: int, text_field: str | list[str] | None = None) -> Generator[pandas.DataFrame, Any, None]:
+def iter_parquet_batches(parquet_path: Path | str, batch_size: int, text_field: str | list[str] | None = None) -> Iterator['pandas.DataFrame']:
     """Stream batches of data from a parquet file."""
     if isinstance(parquet_path, str): parquet_path = Path(parquet_path)
     if isinstance(text_field, str): text_field = [text_field]
@@ -28,7 +28,7 @@ def stream_corpus_batches(parquet_path: Path | str, batch_size: int, text_field:
         yield batch.to_pandas()
 
 
-def stream_read_jsonl(file_path: Path):
+def iter_jsonl_rows(file_path: Path) -> Iterator[dict]:
     """ 流式读取jsonl文件 """
     with open(file_path, 'r', encoding='utf-8') as f:
         for line in f:

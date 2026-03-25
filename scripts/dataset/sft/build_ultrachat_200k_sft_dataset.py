@@ -6,7 +6,7 @@ from tqdm import tqdm
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent.parent))
 
 from src.utils.path import data_path
-from scripts.dataset.utils import stream_corpus_batches, build_sft_dataset
+from scripts.dataset.utils import iter_parquet_batches, build_sft_dataset
 
 
 def main():
@@ -23,7 +23,7 @@ def main():
         unit='file',
         dynamic_ncols=True,
     ):
-        for batch_df in stream_corpus_batches(
+        for batch_df in iter_parquet_batches(
             parquet_path=data_path('tokenizer', 'source_corpus', 'HuggingFaceH4-ultrachat_200k', file),
             batch_size=1024,
             text_field='messages'

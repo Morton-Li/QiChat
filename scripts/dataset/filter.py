@@ -10,7 +10,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from src.utils.masks import build_span_mask
 from src.utils.path import data_path
-from scripts.dataset.utils import stream_corpus_batches, auto_select_precision_from_range, generate_report
+from scripts.dataset.utils import iter_parquet_batches, auto_select_precision_from_range, generate_report
 
 
 def process_corpus_file(
@@ -39,7 +39,7 @@ def process_corpus_file(
 
     dataset: list[numpy.ndarray[int]] = []
     sample_lens: list[int] = []
-    for batch in stream_corpus_batches(parquet_path=parquet_path, batch_size=16000, text_field='tokenized'):
+    for batch in iter_parquet_batches(parquet_path=parquet_path, batch_size=16000, text_field='tokenized'):
         print('.', end='', flush=True)
         for sample in batch.stack().dropna().reset_index(drop=True):
             # sample 为 numpy.ndarray

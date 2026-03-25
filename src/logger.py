@@ -1,5 +1,6 @@
 import datetime
 import os
+import sys
 import threading
 from typing import Optional, Literal
 
@@ -85,7 +86,8 @@ class Logger:
                 with open(log_path(self.log_filename), 'a') as f:
                     f.write(log_message + '\n') if newline else f.write(log_message)
 
-            print(f"{log_level_selected["color"]}{log_message}{RESET_COLOR}") if newline else print(f"{log_level_selected["color"]}{log_message}{RESET_COLOR}", end='', flush=True)
+            if sys.stdout.isatty(): log_message = f"{log_level_selected["color"]}{log_message}{RESET_COLOR}"
+            print(log_message) if newline else print(log_message, end='', flush=True)
 
     def debug(self, message: str, newline: bool = True): self.log(message, 1, newline)
     def info(self, message: str, newline: bool = True): self.log(message, 2, newline)
@@ -118,7 +120,8 @@ class Logger:
                 with open(log_path(self.log_filename), 'a') as f:
                     f.write(message + '\n') if newline else f.write(message)
 
-            print(f"{log_level_selected["color"]}{message}{RESET_COLOR}") if newline else print(f"{log_level_selected["color"]}{message}{RESET_COLOR}", end='', flush=True if newline else False)
+            if sys.stdout.isatty(): message = f"{log_level_selected["color"]}{message}{RESET_COLOR}"
+            print(message) if newline else print(message, end='', flush=True)
 
     def enable(self): self._enabled = True
     def disable(self): self._enabled = False
